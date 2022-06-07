@@ -1,7 +1,7 @@
 {
-  "name": "y-websocket",
-  "version": "1.4.3",
-  "description": "Websockets provider for Yjs",
+  "name": "@synthesia/y-websocket",
+  "version": "1.4.3-alpha",
+  "description": "Websockets provider for Yjs - Synthesia fork",
   "main": "./dist/y-websocket.cjs",
   "module": "./src/y-websocket.js",
   "types": "./dist/src/y-websocket.d.ts",
@@ -37,7 +37,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/yjs/y-websocket.git"
+    "url": "git+https://github.com/Synthesia-Technologies/y-websocket.git"
   },
   "keywords": [
     "Yjs"
@@ -45,9 +45,9 @@
   "author": "Kevin Jahns <kevin.jahns@protonmail.com>",
   "license": "MIT",
   "bugs": {
-    "url": "https://github.com/yjs/y-websocket/issues"
+    "url": "https://github.com/Synthesia-Technologies/y-websocket/issues"
   },
-  "homepage": "https://github.com/yjs/y-websocket#readme",
+  "homepage": "https://github.com/Synthesia-Technologies/y-websocket#readme",
   "standard": {
     "ignore": [
       "/dist",
