@@ -1,5 +1,5 @@
 {
-  "name": "@synthesia/y-websocket",
+  "name": "@ac-synth/y-websocket",
   "version": "1.4.3-alpha",
   "description": "Websockets provider for Yjs - Synthesia fork",
   "main": "./dist/y-websocket.cjs",
