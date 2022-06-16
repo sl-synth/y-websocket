@@ -19,12 +19,13 @@ import * as awarenessProtocol from 'y-protocols/awareness'
 import { Observable } from 'lib0/observable'
 import * as math from 'lib0/math'
 import * as url from 'lib0/url'
+import hashSum from 'hash-sum'
 
 const messageSync = 0
 const messageQueryAwareness = 3
 const messageAwareness = 1
 const messageAuth = 2
-const messagePersistence = 7
+const messagePersistence = 99
 
 /**
  *                       encoder,          decoder,          provider,          emitSynced, messageType
@@ -53,53 +54,46 @@ messageHandlers[messageAuth] = (encoder, decoder, provider, emitSynced, messageT
   authProtocol.readAuthMessage(decoder, provider.doc, permissionDeniedHandler)
 }
 
-const compareStateVectors = (localSv, remoteSv) => {
-  if (localSv.length !== remoteSv.length) {
-    return false
-  }
-
-  for (let i = 0; i < localSv.length; i += 1) {
-    if (localSv[i] !== remoteSv[i]) {
-      return false
-    }
-  }
-
-  return true
-}
+const messagePersistenceSaving = 0
+const messagePersistenceSaved = 1
+const messagePersistenceFailure = 2
 
 messageHandlers[messagePersistence] = (encoder, decoder, provider, emitSynced, messageType) => {
-  const remoteStateVector = decoding.readVarUint8Array(decoder)
-  const remoteDeleteChecksum = decoding.readVarUint(decoder)
+  const persistenceMessageType = decoding.readVarUint(decoder)
 
-  const localStateVector = Y.encodeStateVector(provider.doc)
-  let localDeleteChecksum = 0
-  provider.doc.store.clients.forEach(values => {
-    values.forEach(item => {
-      if (item.deleted) {
-        localDeleteChecksum += item.length
+  switch (persistenceMessageType) {
+    case messagePersistenceSaving:
+      provider.emit('saving', [])
+      break
+    case messagePersistenceFailure:
+      provider.emit('saveFailure', [])
+      break
+    case messagePersistenceSaved: {
+      const remoteStateChecksum = decoding.readVarString(decoder)
+      const encodedLocalState = Y.encodeStateAsUpdate(provider.doc)
+
+      // Apply the encoded local state to a fresh document so the state is garbage-collected.
+      // This is necessary, because with the following hash sum:
+      //
+      //     const localStateChecksum = hashSum(encodedLocalState)
+      //
+      // The state will not match the server if there are any recent deletes, because the local
+      // state will have items representing the undeleted content, whereas the remote state
+      // will be fully garbage collected.
+      // TODO: ask Kevin if there's a better, more efficient way to do this.
+      const garbageCollectedDoc = new Y.Doc()
+      Y.applyUpdate(garbageCollectedDoc, encodedLocalState)
+      const localStateChecksum = hashSum(Y.encodeStateAsUpdate(garbageCollectedDoc))
+      garbageCollectedDoc.destroy()
+
+      if (remoteStateChecksum !== localStateChecksum) {
+        console.log(`synthesia-rtc: state checksums not equal! ${remoteStateChecksum} !== ${localStateChecksum}`)
+      } else {
+        provider.emit('saved', [])
+        clearTimeout(provider._unpersistedUpdateTimeout)
       }
-    })
-  })
-
-  const stateVectorsEqual = compareStateVectors(localStateVector, remoteStateVector)
-  if (!stateVectorsEqual) {
-    console.log('synthesia-rtc: state vectors not equal!')
-    console.log(`synthesia-rtc: local state: ${localStateVector}`)
-    console.log(`synthesia-rtc: other state: ${remoteStateVector}`)
-  }
-
-  const deleteChecksumsEqual = localDeleteChecksum === remoteDeleteChecksum
-  if (!deleteChecksumsEqual) {
-    console.log(`synthesia-rtc: delete checksums not equal! ${localDeleteChecksum} != ${remoteDeleteChecksum}`)
-  }
-
-  provider._lastPersistedStateVector = remoteStateVector
-
-  // If we know the local state is fully persisted, emit a 'persisted' event, and
-  // clear the timeout that would have re-broadcasted any unpersisted updates
-  if (stateVectorsEqual && deleteChecksumsEqual) {
-    provider.emit('persisted', [])
-    clearTimeout(provider._unpersistedUpdateBroadcastTimeout)
+      break
+    }
   }
 }
 
@@ -207,36 +201,16 @@ const setupWS = provider => {
  * @param {WebsocketProvider} provider
  */
 const resetPersistenceTimeout = (provider) => {
-  // Set a timeout to re-broadcast unpersisted changes if we don't receive an acknowledgement for this update
-  if (provider._unpersistedUpdateBroadcastTimeout !== 0) {
-    clearTimeout(provider._unpersistedUpdateBroadcastTimeout)
+  // Set a timeout to close the connection if we don't receive a 'saved' acknowledgement
+  // after some timeout (which will therefore trigger a reconnect after which the provider
+  // will attempt to perform a full re-sync of the document data)
+  if (provider._unpersistedUpdateTimeout !== 0) {
+    clearTimeout(provider._unpersistedUpdateTimeout)
   }
-  provider._unpersistedUpdateBroadcastTimeout = setTimeout(
-    () => { broadcastUnpersistedChanges(provider) },
+  provider._unpersistedUpdateTimeout = setTimeout(
+    () => { /** @type {WebSocket} */ (provider.ws).close() },
     provider.persistenceTimeout
   )
-}
-
-/**
- * Broadcasts any local updates (including the full delete set) that have not
- * yet been acknowledged by the server as persisted, according to the provided
- * persisted state vector.
- *
- * This should be called if 10 seconds have passed without a complete
- * persistence acknowledgement since the last broadcast.
- *
- * @param {WebsocketProvider} provider
- */
-const broadcastUnpersistedChanges = (provider) => {
-  console.log('synthesia-rtc: warning - re-broadcasting unpersisted updates')
-  let unpersistedUpdates
-  if (provider._lastPersistedStateVector === null) {
-    unpersistedUpdates = Y.encodeStateAsUpdate(provider.doc)
-  } else {
-    unpersistedUpdates = Y.encodeStateAsUpdate(provider.doc, provider._lastPersistedStateVector)
-  }
-  broadcastMessage(provider, unpersistedUpdates.buffer)
-  resetPersistenceTimeout(provider)
 }
 
 /**
@@ -277,7 +251,7 @@ export class WebsocketProvider extends Observable {
    * @param {typeof WebSocket} [opts.WebSocketPolyfill] Optionall provide a WebSocket polyfill
    * @param {number} [opts.resyncInterval] Request server state every `resyncInterval` milliseconds
    * @param {number} [opts.maxBackoffTime] Maximum amount of time to wait before trying to reconnect (we try to reconnect using exponential backoff)
-   * @param {number} [opts.persistenceTimeout] Maximum amount of time to wait for a persistence acknowledgement before trying to resend updates
+   * @param {number} [opts.persistenceTimeout] Maximum amount of time to wait for a persistence acknowledgement before trying to reconnect and triggering a full sync
    * @param {boolean} [opts.disableBc] Disable cross-tab BroadcastChannel communication
    */
   constructor (serverUrl, roomname, doc, {
@@ -287,7 +261,7 @@ export class WebsocketProvider extends Observable {
     WebSocketPolyfill = WebSocket,
     resyncInterval = -1,
     maxBackoffTime = 2500,
-    persistenceTimeout = 10000,
+    persistenceTimeout = 30000,
     disableBc = false
   } = {}) {
     super()
@@ -344,12 +318,7 @@ export class WebsocketProvider extends Observable {
     /**
      * @type {any}
      */
-    this._unpersistedUpdateBroadcastTimeout = 0
-
-    /**
-     * @type {Uint8Array | null}
-     */
-    this._lastPersistedStateVector = null
+    this._unpersistedUpdateTimeout = 0
 
     /**
      * @param {ArrayBuffer} data
@@ -433,8 +402,8 @@ export class WebsocketProvider extends Observable {
     }
     clearInterval(this._checkInterval)
 
-    if (this._unpersistedUpdateBroadcastTimeout !== 0) {
-      clearTimeout(this._unpersistedUpdateBroadcastTimeout)
+    if (this._unpersistedUpdateTimeout !== 0) {
+      clearTimeout(this._unpersistedUpdateTimeout)
     }
 
     this.disconnect()
