@@ -1,7 +1,7 @@
 {
-  "name": "y-websocket",
-  "version": "1.4.3",
-  "description": "Websockets provider for Yjs",
+  "name": "@ac-synth/y-websocket",
+  "version": "1.4.3-alpha3",
+  "description": "Websockets provider for Yjs - Synthesia fork",
   "main": "./dist/y-websocket.cjs",
   "module": "./src/y-websocket.js",
   "types": "./dist/src/y-websocket.d.ts",
@@ -37,7 +37,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/yjs/y-websocket.git"
+    "url": "git+https://github.com/Synthesia-Technologies/y-websocket.git"
   },
   "keywords": [
     "Yjs"
@@ -45,9 +45,9 @@
   "author": "Kevin Jahns <kevin.jahns@protonmail.com>",
   "license": "MIT",
   "bugs": {
-    "url": "https://github.com/yjs/y-websocket/issues"
+    "url": "https://github.com/Synthesia-Technologies/y-websocket/issues"
   },
-  "homepage": "https://github.com/yjs/y-websocket#readme",
+  "homepage": "https://github.com/Synthesia-Technologies/y-websocket#readme",
   "standard": {
     "ignore": [
       "/dist",
@@ -55,6 +55,7 @@
     ]
   },
   "dependencies": {
+    "hash-sum": "^2.0.0",
     "lib0": "^0.2.42",
     "lodash.debounce": "^4.0.8",
     "y-protocols": "^1.0.5"
@@ -63,11 +64,10 @@
     "rollup": "^1.32.1",
     "rollup-cli": "^1.0.9",
     "standard": "^12.0.1",
-    "typescript": "^3.9.9",
-    "yjs": "^13.5.0"
+    "typescript": "^3.9.9"
   },
   "peerDependencies": {
-    "yjs": "^13.5.6"
+    "yjs": "^13.5.39"
   },
   "optionalDependencies": {
     "ws": "^6.2.1",

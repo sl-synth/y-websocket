@@ -19,11 +19,13 @@ import * as awarenessProtocol from 'y-protocols/awareness'
 import { Observable } from 'lib0/observable'
 import * as math from 'lib0/math'
 import * as url from 'lib0/url'
+import hashSum from 'hash-sum'
 
 const messageSync = 0
 const messageQueryAwareness = 3
 const messageAwareness = 1
 const messageAuth = 2
+const messagePersistence = 99
 
 /**
  *                       encoder,          decoder,          provider,          emitSynced, messageType
@@ -52,6 +54,49 @@ messageHandlers[messageAuth] = (encoder, decoder, provider, emitSynced, messageT
   authProtocol.readAuthMessage(decoder, provider.doc, permissionDeniedHandler)
 }
 
+const messagePersistenceSaving = 0
+const messagePersistenceSaved = 1
+const messagePersistenceFailure = 2
+
+messageHandlers[messagePersistence] = (encoder, decoder, provider, emitSynced, messageType) => {
+  const persistenceMessageType = decoding.readVarUint(decoder)
+
+  switch (persistenceMessageType) {
+    case messagePersistenceSaving:
+      provider.emit('saving', [])
+      break
+    case messagePersistenceFailure:
+      provider.emit('saveFailure', [])
+      break
+    case messagePersistenceSaved: {
+      const remoteStateChecksum = decoding.readVarString(decoder)
+      const encodedLocalState = Y.encodeStateAsUpdate(provider.doc)
+
+      // Apply the encoded local state to a fresh document so the state is garbage-collected.
+      // This is necessary, because with the following hash sum:
+      //
+      //     const localStateChecksum = hashSum(encodedLocalState)
+      //
+      // The state will not match the server if there are any recent deletes, because the local
+      // state will have items representing the undeleted content, whereas the remote state
+      // will be fully garbage collected.
+      // TODO: ask Kevin if there's a better, more efficient way to do this.
+      const garbageCollectedDoc = new Y.Doc()
+      Y.applyUpdate(garbageCollectedDoc, encodedLocalState)
+      const localStateChecksum = hashSum(Y.encodeStateAsUpdate(garbageCollectedDoc))
+      garbageCollectedDoc.destroy()
+
+      if (remoteStateChecksum !== localStateChecksum) {
+        console.log(`synthesia-rtc: state checksums not equal! ${remoteStateChecksum} !== ${localStateChecksum}`)
+      } else {
+        provider.emit('saved', [])
+        clearTimeout(provider._unpersistedUpdateTimeout)
+      }
+      break
+    }
+  }
+}
+
 // @todo - this should depend on awareness.outdatedTime
 const messageReconnectTimeout = 30000
 
@@ -71,6 +116,7 @@ const readMessage = (provider, buf, emitSynced) => {
   const decoder = decoding.createDecoder(buf)
   const encoder = encoding.createEncoder()
   const messageType = decoding.readVarUint(decoder)
+
   const messageHandler = provider.messageHandlers[messageType]
   if (/** @type {any} */ (messageHandler)) {
     messageHandler(encoder, decoder, provider, emitSynced, messageType)
@@ -150,6 +196,24 @@ const setupWS = provider => {
 }
 
 /**
+ * Resets the timeout to broadcast unpersisted messages
+ *
+ * @param {WebsocketProvider} provider
+ */
+const resetPersistenceTimeout = (provider) => {
+  // Set a timeout to close the connection if we don't receive a 'saved' acknowledgement
+  // after some timeout (which will therefore trigger a reconnect after which the provider
+  // will attempt to perform a full re-sync of the document data)
+  if (provider._unpersistedUpdateTimeout !== 0) {
+    clearTimeout(provider._unpersistedUpdateTimeout)
+  }
+  provider._unpersistedUpdateTimeout = setTimeout(
+    () => { /** @type {WebSocket} */ (provider.ws).close() },
+    provider.persistenceTimeout
+  )
+}
+
+/**
  * @param {WebsocketProvider} provider
  * @param {ArrayBuffer} buf
  */
@@ -187,6 +251,7 @@ export class WebsocketProvider extends Observable {
    * @param {typeof WebSocket} [opts.WebSocketPolyfill] Optionall provide a WebSocket polyfill
    * @param {number} [opts.resyncInterval] Request server state every `resyncInterval` milliseconds
    * @param {number} [opts.maxBackoffTime] Maximum amount of time to wait before trying to reconnect (we try to reconnect using exponential backoff)
+   * @param {number} [opts.persistenceTimeout] Maximum amount of time to wait for a persistence acknowledgement before trying to reconnect and triggering a full sync
    * @param {boolean} [opts.disableBc] Disable cross-tab BroadcastChannel communication
    */
   constructor (serverUrl, roomname, doc, {
@@ -196,6 +261,7 @@ export class WebsocketProvider extends Observable {
     WebSocketPolyfill = WebSocket,
     resyncInterval = -1,
     maxBackoffTime = 2500,
+    persistenceTimeout = 30000,
     disableBc = false
   } = {}) {
     super()
@@ -205,6 +271,7 @@ export class WebsocketProvider extends Observable {
     }
     const encodedParams = url.encodeQueryParams(params)
     this.maxBackoffTime = maxBackoffTime
+    this.persistenceTimeout = persistenceTimeout
     this.bcChannel = serverUrl + '/' + roomname
     this.url = serverUrl + '/' + roomname + (encodedParams.length === 0 ? '' : '?' + encodedParams)
     this.roomname = roomname
@@ -249,6 +316,11 @@ export class WebsocketProvider extends Observable {
     }
 
     /**
+     * @type {any}
+     */
+    this._unpersistedUpdateTimeout = 0
+
+    /**
      * @param {ArrayBuffer} data
      * @param {any} origin
      */
@@ -271,6 +343,9 @@ export class WebsocketProvider extends Observable {
         encoding.writeVarUint(encoder, messageSync)
         syncProtocol.writeUpdate(encoder, update)
         broadcastMessage(this, encoding.toUint8Array(encoder))
+
+        // Set a timeout to re-broadcast unpersisted changes if we don't receive an acknowledgement for this update
+        resetPersistenceTimeout(this)
       }
     }
     this.doc.on('update', this._updateHandler)
@@ -326,6 +401,11 @@ export class WebsocketProvider extends Observable {
       clearInterval(this._resyncInterval)
     }
     clearInterval(this._checkInterval)
+
+    if (this._unpersistedUpdateTimeout !== 0) {
+      clearTimeout(this._unpersistedUpdateTimeout)
+    }
+
     this.disconnect()
     if (typeof window !== 'undefined') {
       window.removeEventListener('beforeunload', this._beforeUnloadHandler)
